@@ -71,6 +71,8 @@
 #include <sched.h>
 #endif
 
+using namespace facebook::velox;
+
 namespace facebook::presto {
 namespace {
 
@@ -125,11 +127,11 @@ bool isCacheTtlEnabled() {
   return false;
 }
 
-bool isCachePeriodicFullPersistenceEnabled() {
+bool cachePeriodicPersistenceEnabled() {
   const auto* systemConfig = SystemConfig::instance();
   return systemConfig->asyncDataCacheEnabled() &&
       systemConfig->asyncCacheSsdGb() > 0 &&
-      systemConfig->asyncCacheFullPersistenceInterval() >
+      systemConfig->asyncCachePersistenceInterval() >
       std::chrono::seconds::zero();
 }
 
@@ -184,7 +186,7 @@ void PrestoServer::run() {
 
       ciphers = systemConfig->httpsSupportedCiphers();
       if (ciphers.empty()) {
-        VELOX_USER_FAIL("Https is enabled without ciphers")
+        VELOX_USER_FAIL("Https is enabled without ciphers");
       }
 
       auto optionalCertPath = systemConfig->httpsCertPath();
@@ -1006,7 +1008,7 @@ void PrestoServer::addServerPeriodicTasks() {
         "cache_ttl");
   }
 
-  if (isCachePeriodicFullPersistenceEnabled()) {
+  if (cachePeriodicPersistenceEnabled()) {
     PRESTO_STARTUP_LOG(INFO)
         << "Initializing cache periodic full persistence task...";
     auto* cache = velox::cache::AsyncDataCache::getInstance();
@@ -1016,31 +1018,18 @@ void PrestoServer::addServerPeriodicTasks() {
     const auto* systemConfig = SystemConfig::instance();
     const int64_t cacheFullPersistenceIntervalUs =
         std::chrono::duration_cast<std::chrono::microseconds>(
-            systemConfig->asyncCacheFullPersistenceInterval())
+            systemConfig->asyncCachePersistenceInterval())
             .count();
-    const auto asyncCacheSsdCheckpointGb =
-        systemConfig->asyncCacheSsdCheckpointGb();
     periodicTaskManager_->addTask(
-        [asyncCacheSsdCheckpointGb, cache, ssdCache]() {
+        [cache, ssdCache]() {
           try {
             if (!ssdCache->startWrite()) {
               return;
             }
-            LOG(INFO) << "Persisting full cache to SSD...";
-            cache->saveToSsd(true);
+            LOG(INFO) << "Flush in-memory cache to SSD...";
+            cache->saveToSsd();
             ssdCache->waitForWriteToFinish();
-            LOG(INFO) << "Cache full persistence completed.";
-
-            if (asyncCacheSsdCheckpointGb == 0) {
-              return;
-            }
-
-            if (!ssdCache->startWrite()) {
-              return;
-            }
-
-            ssdCache->checkpoint();
-            ssdCache->waitForWriteToFinish();
+            LOG(INFO) << "Flushing in-memory cache to SSD completed.";
           } catch (const std::exception& e) {
             LOG(ERROR) << "Failed to persistent cache to SSD: " << e.what();
           }
